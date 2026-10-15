@@ -1,0 +1,171 @@
+{% extends "base.html" %}
+{% block title %}Upload — transfer.lyr4.net{% endblock %}
+
+{% block page_head %}
+<h1>Upload files</h1>
+<p class="subtitle">Enter your full key, <code>CODE#SECRET</code>. Files are encrypted in your browser before upload.</p>
+{% endblock %}
+
+{% block content %}
+<div class="card" id="upload-card">
+  <div id="error-box" class="error-box" style="display:none;"></div>
+
+  <div id="form-area">
+    <label for="auth_code">Upload key</label>
+    <input type="text" id="auth_code" autocomplete="off" data-code="{{ auth_code or '' }}">
+
+    <label for="file-input">Files</label>
+    <input type="file" id="file-input" multiple>
+
+    <button id="upload-btn" onclick="startUpload()">Upload</button>
+    <a class="btn" href="/files" style="background: none; border: 1px solid var(--border); color: var(--text-dim); margin-left: 0.5rem;">My uploads</a>
+  </div>
+
+  <div id="progress-area" style="display:none;">
+    <label id="progress-label">Uploading…</label>
+    <div style="background: var(--bg); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; margin-bottom: 0.5rem;">
+      <div id="progress-bar" style="height: 6px; background: var(--accent); width: 0%; transition: width 0.2s;"></div>
+    </div>
+    <div id="progress-detail" style="font-size: 0.8rem; color: var(--text-dim); font-family: var(--mono); margin-bottom: 1.25rem;"></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/e2e.js"></script>
+<script>
+const CHUNK_SIZE = E2E.CHUNK_SIZE;
+
+function generateUUID() {
+  return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
+    (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16));
+}
+
+function fmtSize(bytes) {
+  const units = ['B','KB','MB','GB'];
+  let i = 0;
+  while (bytes >= 1024 && i < units.length - 1) { bytes /= 1024; i++; }
+  return bytes.toFixed(1) + ' ' + units[i];
+}
+
+function showError(msg) {
+  const box = document.getElementById('error-box');
+  box.textContent = msg;
+  box.style.display = 'block';
+  document.getElementById('progress-area').style.display = 'none';
+  document.getElementById('form-area').style.display = 'block';
+  document.getElementById('upload-btn').disabled = false;
+}
+
+function setProgress(fileNum, fileTotal, chunkCur, chunkAll, bytesDone, totalBytes) {
+  const pct = totalBytes > 0 ? Math.round((bytesDone / totalBytes) * 100) : 0;
+  document.getElementById('progress-bar').style.width = pct + '%';
+  document.getElementById('progress-label').textContent =
+    `Uploading file ${fileNum} of ${fileTotal}… ${pct}%`;
+  document.getElementById('progress-detail').textContent =
+    `${fmtSize(bytesDone)} / ${fmtSize(totalBytes)}`;
+}
+
+async function startUpload() {
+  const { code: authCode, secret } = E2E.splitKey(document.getElementById('auth_code').value);
+  const fileInput = document.getElementById('file-input');
+  const files = fileInput.files;
+
+  if (!authCode)      return showError('Upload key is required.');
+  if (secret.length < 16) return showError('Enter your full key, CODE#SECRET. The secret after # must be at least 16 characters.');
+  if (!files.length)  return showError('No files selected.');
+
+  document.getElementById('upload-btn').disabled = true;
+  document.getElementById('error-box').style.display = 'none';
+  document.getElementById('form-area').style.display = 'none';
+  document.getElementById('progress-area').style.display = 'block';
+
+  const uploadId = generateUUID();
+  const keyBytes = await E2E.uploadKeyBytes(secret, uploadId);
+  const key = await E2E.aesKey(keyBytes);
+  const totalBytes = Array.from(files).reduce((s, f) => s + f.size, 0);
+  let bytesDone = 0;
+  const finishedFiles = [];
+
+  for (let fi = 0; fi < files.length; fi++) {
+    const file = files[fi];
+    const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
+
+    for (let ci = 0; ci < totalChunks; ci++) {
+      const start = ci * CHUNK_SIZE;
+      const end   = Math.min(start + CHUNK_SIZE, file.size);
+      const chunk = new Blob([await E2E.seal(key, await file.slice(start, end).arrayBuffer(),
+                                             E2E.chunkAad(fi, ci, totalChunks))]);
+
+      const fd = new FormData();
+      fd.append('auth_code',   authCode);
+      fd.append('upload_id',   uploadId);
+      fd.append('file_index',  fi);
+      fd.append('chunk_index', ci);
+      fd.append('chunk_total', totalChunks);
+      fd.append('filename',    `f${fi}`);
+      fd.append('chunk',       chunk);
+
+      let res, data;
+      try {
+        res  = await fetch('/upload/chunk', { method: 'POST', body: fd });
+        data = await res.json();
+      } catch (e) {
+        return showError('Network error — upload interrupted. Try again.');
+      }
+
+      if (data.error) return showError(data.error);
+
+      bytesDone += (end - start);
+      setProgress(fi + 1, files.length, ci + 1, totalChunks, bytesDone, totalBytes);
+
+      if (data.done) {
+        finishedFiles.push({ filename: data.filename, index: fi,
+                             name_enc: await E2E.sealName(key, fi, file.name) });
+      }
+    }
+  }
+
+  // Finalize — write metadata and get the download link
+  let res, data;
+  try {
+    res = await fetch('/upload/finalize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        auth_code: authCode,
+        upload_id: uploadId,
+        files: finishedFiles,
+        encrypted: true,
+      }),
+    });
+    data = await res.json();
+  } catch (e) {
+    return showError('Network error during finalization.');
+  }
+
+  if (data.error) return showError(data.error);
+  window.location.href = `/${uploadId}#${E2E.b64u(keyBytes)}`;
+}
+
+// Logged in from My uploads: rebuild CODE#SECRET from the session code and this tab's secret
+(function () {
+  const field = document.getElementById('auth_code');
+  let secret = '';
+  try { secret = sessionStorage.getItem('transfer_secret') || ''; } catch (e) {}
+  if (field.dataset.code && secret) field.value = `${field.dataset.code}#${secret}`;
+})();
+
+// Label update on file select
+document.getElementById('file-input').addEventListener('change', function() {
+  const label = this.previousElementSibling;
+  if (this.files.length === 1) {
+    const f = this.files[0];
+    label.textContent = `Files — ${f.name} (${fmtSize(f.size)})`;
+  } else if (this.files.length > 1) {
+    const total = Array.from(this.files).reduce((s, f) => s + f.size, 0);
+    label.textContent = `Files — ${this.files.length} files (${fmtSize(total)})`;
+  }
+});
+</script>
+{% endblock %}

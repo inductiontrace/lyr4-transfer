@@ -1,0 +1,15 @@
+# Runtime data and secrets
+transfer.db
+secret_key
+uploads/
+metadata/
+staging/
+decrypted/
+keylist/
+gunicorn.ctl
+
+# Not part of transfer
+vault/
+
+.backup-*/
+__pycache__/

@@ -1,0 +1,186 @@
+{% extends "base.html" %}
+{% block title %}Download — transfer.lyr4.net{% endblock %}
+
+{% block page_head %}
+<h1>{{ meta.files | length }} file{{ 's' if meta.files | length != 1 }}</h1>
+<p class="subtitle">Uploaded {{ meta.uploaded_at[:19].replace('T', ' ') }} UTC{% if meta.encrypted %} · encrypted{% endif %}</p>
+{% endblock %}
+
+{% block content %}
+{% if meta.encrypted %}
+<div id="error-box" class="error-box" style="display:none;"></div>
+{% endif %}
+
+<div class="card">
+  {% for file in meta.files %}
+  <div class="file-row">
+    <div class="file-info">
+      {% if meta.encrypted %}
+      <span class="file-name" data-index="{{ file.index }}" data-name-enc="{{ file.name_enc }}">encrypted</span>
+      <span class="file-size" data-cipher-size="{{ file.size }}"></span>
+      {% else %}
+      <span class="file-name">{{ file.filename }}</span>
+      <span class="file-size">{{ file.size | fmt_size }}</span>
+      {% endif %}
+    </div>
+    {% if meta.encrypted %}
+    <button class="dl-btn" data-file="{{ file.filename }}" data-index="{{ file.index }}" data-cipher-size="{{ file.size }}">↓</button>
+    {% else %}
+    <a class="dl-btn" href="/{{ file_uuid }}/{{ file.filename }}" download>↓</a>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+
+{% if meta.encrypted %}
+<div id="dl-status" class="file-size" style="margin-top: 0.75rem;"></div>
+<div class="copy-box" id="share" style="display:none;">
+  <code id="share-link"></code>
+  <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('share-link').textContent)">Copy</button>
+</div>
+<p class="file-size" style="font-size: 0.8rem;">The key is the part of the link after #. It never reaches the server; anyone with the full link can open these files.</p>
+{% elif meta.files | length > 1 %}
+<div style="margin-top: 1rem; text-align: right;">
+  <span class="file-size" style="font-size: 0.8rem; color: var(--text-dim);">
+    Total: {{ meta.files | sum(attribute='size') | fmt_size }}
+  </span>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{% if meta.encrypted %}
+<script src="/static/e2e.js"></script>
+<script>
+const UPLOAD_ID = {{ file_uuid | tojson }};
+const names = {};
+
+function fail(msg) {
+  const box = document.getElementById('error-box');
+  box.textContent = msg;
+  box.style.display = 'block';
+}
+
+function fmtSize(bytes) {
+  const units = ['B','KB','MB','GB','TB'];
+  let i = 0;
+  while (bytes >= 1024 && i < units.length - 1) { bytes /= 1024; i++; }
+  return bytes.toFixed(1) + ' ' + units[i];
+}
+
+async function download(btn, key) {
+  const idx = Number(btn.dataset.index);
+  const cipherSize = Number(btn.dataset.cipherSize);
+  const { total, stride } = E2E.layout(cipherSize);
+  const url = `/${UPLOAD_ID}/${btn.dataset.file}`;
+  const status = document.getElementById('dl-status');
+
+  // Stream to disk where the browser allows it; otherwise collect in memory
+  let writable = null;
+  const parts = [];
+  if (window.showSaveFilePicker) {
+    try {
+      const handle = await showSaveFilePicker({ suggestedName: names[idx] });
+      writable = await handle.createWritable();
+    } catch (e) { return; }  // picker cancelled
+  }
+
+  btn.disabled = true;
+  try {
+    for (let ci = 0; ci < total; ci++) {
+      const end = Math.min((ci + 1) * stride, cipherSize) - 1;
+      const res = await fetch(url, { headers: { Range: `bytes=${ci * stride}-${end}` } });
+      if (!res.ok || (total > 1 && res.status !== 206)) throw new Error(`server answered ${res.status}`);
+      const plain = await E2E.open(key, await res.arrayBuffer(), E2E.chunkAad(idx, ci, total));
+      if (writable) await writable.write(plain); else parts.push(plain);
+      status.textContent = `Decrypting ${names[idx]}… ${Math.round((ci + 1) / total * 100)}%`;
+    }
+    if (writable) {
+      await writable.close();
+    } else {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob(parts));
+      a.download = names[idx];
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    }
+    status.textContent = `Saved ${names[idx]}.`;
+  } catch (e) {
+    if (writable) await writable.abort();
+    fail(e.name === 'OperationError'
+      ? 'This file could not be decrypted: the key in the link is wrong or the file was altered.'
+      : `Download failed: ${e.message}`);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+(async function () {
+  const linkKey = location.hash.slice(1);
+  if (!linkKey) return fail('This link is missing its key (the part after #), so the files cannot be opened.');
+  let key;
+  try { key = await E2E.aesKey(E2E.unb64u(linkKey)); }
+  catch (e) { return fail('The key in this link is malformed.'); }
+
+  for (const el of document.querySelectorAll('[data-name-enc]')) {
+    try {
+      names[el.dataset.index] = await E2E.openName(key, Number(el.dataset.index), el.dataset.nameEnc);
+      el.textContent = names[el.dataset.index];
+    } catch (e) {
+      return fail('The key in this link does not open these files.');
+    }
+  }
+  for (const el of document.querySelectorAll('.file-size[data-cipher-size]')) {
+    el.textContent = fmtSize(E2E.layout(Number(el.dataset.cipherSize)).plainSize);
+  }
+  for (const btn of document.querySelectorAll('button.dl-btn')) {
+    btn.addEventListener('click', () => download(btn, key));
+  }
+  document.getElementById('share-link').textContent = location.href;
+  document.getElementById('share').style.display = 'flex';
+})();
+</script>
+{% endif %}
+{% endblock %}
+
+{% block head %}
+<style>
+  .file-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.6rem 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .file-row:last-child { border-bottom: none; }
+  .file-info { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
+  .file-name {
+    color: var(--text);
+    font-size: 0.9rem;
+    font-weight: 500;
+    word-break: break-all;
+  }
+  .file-size {
+    color: var(--text-dim);
+    font-size: 0.8rem;
+    font-family: var(--mono);
+  }
+  .dl-btn {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
+    padding: 0;
+    background: var(--accent);
+    color: #fff;
+    border-radius: var(--radius);
+    text-decoration: none;
+    font-size: 1rem;
+    font-weight: 700;
+    margin-left: 1rem;
+  }
+  .dl-btn:hover { opacity: 0.85; }
+</style>
+{% endblock %}

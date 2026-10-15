@@ -1,0 +1,13 @@
+[Unit]
+Description=Lyra Transfer Service (transfer.lyr4.net)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/operations/Lyra/interfaces/transfer
+ExecStart=/home/operations/Lyra/.venv/bin/gunicorn -w 2 -b 0.0.0.0:5001 --timeout 120 --access-logfile - app:app
+Restart=always
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

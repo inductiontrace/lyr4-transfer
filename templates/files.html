@@ -1,0 +1,217 @@
+{% extends "base.html" %}
+{% block title %}My uploads — transfer.lyr4.net{% endblock %}
+
+{% block page_head %}
+{% if uploads is none %}
+<h1>My uploads</h1>
+<p class="subtitle">Enter your full key, <code>CODE#SECRET</code>, to see what you've uploaded.</p>
+{% else %}
+<div class="title-row">
+  <h1>My uploads</h1>
+  <form method="post" action="/files/logout" id="logout-form"><button type="submit" class="ghost-btn">Log out</button></form>
+</div>
+{% if label %}<p class="subtitle">Vault Name: <span class="vault-name">{{ label }}</span></p>{% endif %}
+{% endif %}
+{% endblock %}
+
+{% block content %}
+{% if uploads is none %}
+
+<div class="card">
+  {% if error %}<div class="error-box">{{ error }}</div>{% endif %}
+  <form id="login-form">
+    <label for="auth_code">Upload key</label>
+    <input type="text" id="auth_code" autocomplete="off" autofocus>
+    <button type="submit">Enter</button>
+  </form>
+</div>
+{% else %}
+
+<div id="secret-missing" class="error-box" style="display:none;">This tab doesn't have your encryption key, so your files can't be opened here. Log out and back in with your full key, <code>CODE#SECRET</code>.</div>
+<p id="key-ok" class="key-status" style="display:none;">Encryption key loaded for this tab</p>
+
+<div class="usage">
+  {% set count = uploads | length ~ ' upload' ~ ('s' if uploads | length != 1 else '') %}
+  {% if max_bytes %}
+  {% set pct = [100, (used * 100 / max_bytes) | round(1)] | min %}
+  <div class="usage-bar" role="meter" aria-valuemin="0" aria-valuemax="{{ max_bytes }}" aria-valuenow="{{ used }}"
+       title="{{ used | fmt_size }} used, {{ [0, max_bytes - used] | max | fmt_size }} free of {{ max_bytes | fmt_size }} ({{ pct }}%)">
+    <div class="usage-used" style="width: {{ pct }}%;"></div>
+  </div>
+  <div class="usage-text">
+    <span><strong>{{ [0, max_bytes - used] | max | fmt_size }}</strong> free</span>
+    <span>{{ count }} · {{ used | fmt_size }} of {{ max_bytes | fmt_size }} used</span>
+  </div>
+  {% else %}
+  <span>{{ count }} · {{ used | fmt_size }} used · no limit</span>
+  {% endif %}
+</div>
+
+<a class="btn" href="/upload" style="margin-bottom: 1.25rem;">Upload new file</a>
+
+<div class="card">
+  {% for meta in uploads %}
+  <a class="upload-row" href="/{{ meta.uuid }}"{% if meta.encrypted %} data-uuid="{{ meta.uuid }}"{% endif %}>
+    <div class="upload-files">
+      {% for file in meta.files %}
+      {% if meta.encrypted %}
+      <span class="file-name" data-index="{{ file.index }}" data-name-enc="{{ file.name_enc }}">encrypted</span>
+      {% else %}
+      <span class="file-name">{{ file.filename }}</span>
+      {% endif %}
+      {% endfor %}
+    </div>
+    <div class="upload-meta">
+      <span>{{ meta.files | sum(attribute='size') | fmt_size }}</span>
+      <span>{{ meta.uploaded_at[:16].replace('T', ' ') }} UTC</span>
+    </div>
+  </a>
+  {% else %}
+  <p class="subtitle" style="margin: 0;">Nothing uploaded with this key yet.</p>
+  {% endfor %}
+</div>
+
+<h2 class="section-title">Login history</h2>
+<div class="card">
+  {% for login in logins %}
+  <div class="login-row">
+    <span>{{ login.ip }}</span>
+    <span>{{ login.at[:19].replace('T', ' ') }} UTC{% if login.at == login_at %} · this session{% endif %}</span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/e2e.js"></script>
+<script>
+function readSecret() {
+  try { return sessionStorage.getItem('transfer_secret') || ''; } catch (e) { return ''; }
+}
+
+function writeSecret(secret) {
+  try {
+    if (secret) sessionStorage.setItem('transfer_secret', secret);
+    else sessionStorage.removeItem('transfer_secret');
+  } catch (e) {}
+}
+
+// Login: only CODE goes into the request path; SECRET rides in the fragment
+const loginForm = document.getElementById('login-form');
+if (loginForm) {
+  loginForm.addEventListener('submit', ev => {
+    ev.preventDefault();
+    const { code, secret } = E2E.splitKey(document.getElementById('auth_code').value);
+    if (code) location.href = `/files/${encodeURIComponent(code)}#${secret}`;
+  });
+}
+
+const logoutForm = document.getElementById('logout-form');
+if (logoutForm) logoutForm.addEventListener('submit', () => writeSecret(''));
+
+// After login the secret arrives as /files#SECRET: keep it for this tab and clear it from the address bar
+if (location.hash.length > 1) {
+  writeSecret(location.hash.slice(1));
+  history.replaceState(null, '', location.pathname);
+}
+
+(async function () {
+  if (loginForm) return;
+  const secret = readSecret();
+  document.getElementById(secret ? 'key-ok' : 'secret-missing').style.display = 'block';
+  const rows = document.querySelectorAll('a.upload-row[data-uuid]');
+  if (!secret || !rows.length) return;
+  for (const row of rows) {
+    const keyBytes = await E2E.uploadKeyBytes(secret, row.dataset.uuid);
+    const key = await E2E.aesKey(keyBytes);
+    try {
+      for (const el of row.querySelectorAll('[data-name-enc]')) {
+        el.textContent = await E2E.openName(key, Number(el.dataset.index), el.dataset.nameEnc);
+      }
+      row.href = `/${row.dataset.uuid}#${E2E.b64u(keyBytes)}`;
+    } catch (e) {
+      for (const el of row.querySelectorAll('[data-name-enc]')) el.textContent = 'encrypted with a different secret';
+    }
+  }
+})();
+</script>
+{% endblock %}
+
+{% block head %}
+<style>
+  .usage {
+    color: var(--text-dim);
+    font-size: 0.8rem;
+    font-family: var(--mono);
+    margin: 0 0 1.5rem;
+  }
+  .usage-bar {
+    height: 10px;
+    background: var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 0.4rem;
+  }
+  .usage-used { height: 100%; background: var(--accent); border-radius: 4px; }
+  .usage-text { display: flex; justify-content: space-between; gap: 1rem; }
+  .usage-text strong { color: var(--text); font-weight: 600; }
+  .section-title {
+    font-size: 0.8rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin: 2rem 0 0.75rem;
+  }
+  .login-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.4rem 0;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: 0.8rem;
+    font-family: var(--mono);
+  }
+  .login-row:last-child { border-bottom: none; }
+  .title-row { display: flex; align-items: center; gap: 1.25rem; }
+  .title-row h1 { margin-bottom: 0.5rem; }
+  .vault-name { color: var(--text); font-weight: 500; }
+  .key-status {
+    color: var(--success);
+    font-size: 0.8rem;
+    font-family: var(--mono);
+    margin-bottom: 0.75rem;
+  }
+  .key-status::before { content: '\25CF'; margin-right: 0.5rem; }
+  .ghost-btn {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: 0.75rem;
+    padding: 0.3rem 0.7rem;
+  }
+  .upload-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.6rem 0;
+    border-bottom: 1px solid var(--border);
+    text-decoration: none;
+  }
+  .upload-row:last-child { border-bottom: none; }
+  .upload-row:hover .file-name { color: var(--accent); }
+  .upload-files { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
+  .file-name { color: var(--text); font-size: 0.9rem; font-weight: 500; word-break: break-all; }
+  .upload-meta {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    flex-shrink: 0;
+    color: var(--text-dim);
+    font-size: 0.8rem;
+    font-family: var(--mono);
+  }
+</style>
+{% endblock %}
