@@ -188,6 +188,8 @@ def upload_chunk():
         return jsonify({'error': 'Invalid upload key'}), 403
     if os.path.exists(os.path.join(METADATA_DIR, f'{upload_id}.json')):
         return jsonify({'error': 'This upload is already finished'}), 409
+    if not _claim_upload(upload_id, auth_code):
+        return jsonify({'error': 'This upload belongs to another key'}), 403
 
     chunk_file = request.files.get('chunk')
     if not chunk_file:
@@ -228,9 +230,36 @@ def upload_cancel():
         return jsonify({'error': 'Invalid upload key'}), 403
     if os.path.exists(os.path.join(METADATA_DIR, f'{upload_id}.json')):
         return jsonify({'error': 'This upload is already finished'}), 409
+    if _upload_owner(upload_id) not in (None, auth_code):
+        return jsonify({'error': 'This upload belongs to another key'}), 403
     _discard_session(upload_id)
     _sweep_abandoned()
     return jsonify({'cancelled': True})
+
+
+@app.route('/upload/status', methods=['POST'])
+def upload_status():
+    """Which chunks of an unfinished upload have arrived, so the browser can send
+    only the rest: after a stall, or when resuming in a new page."""
+    auth_code = request.json.get('auth_code', '').strip()
+    upload_id = request.json.get('upload_id', '').strip()
+    try:
+        uuid.UUID(upload_id)
+    except ValueError:
+        return jsonify({'error': 'Invalid upload session'}), 400
+    if not check_auth_code(auth_code):
+        return jsonify({'error': 'Invalid upload key'}), 403
+    if os.path.exists(os.path.join(METADATA_DIR, f'{upload_id}.json')):
+        return jsonify({'finished': True})
+    if _upload_owner(upload_id) not in (None, auth_code):
+        return jsonify({'error': 'This upload belongs to another key'}), 403
+    base = os.path.join(STAGING_DIR, upload_id)
+    received = {}
+    if os.path.isdir(base):
+        for d in os.listdir(base):
+            if d.isdigit():
+                received[d] = sorted(int(c) for c in os.listdir(os.path.join(base, d)))
+    return jsonify({'finished': False, 'received': received})
 
 
 @app.route('/upload/finalize', methods=['POST'])
@@ -250,6 +279,9 @@ def upload_finalize():
         return jsonify({'error': 'Invalid upload description'}), 400
     if not check_auth_code(auth_code):
         return jsonify({'error': 'Invalid upload key'}), 403
+
+    if _upload_owner(upload_id) not in (None, auth_code):
+        return jsonify({'error': 'This upload belongs to another key'}), 403
 
     upload_dir = os.path.join(UPLOADS_DIR, upload_id)
     stored = []
@@ -333,6 +365,34 @@ def _committed_bytes(uploads):
 def _dir_bytes(path):
     return sum(os.path.getsize(os.path.join(root, f))
                for root, _, files in os.walk(path) for f in files)
+
+
+def _owner_path(upload_id):
+    return os.path.join(STAGING_DIR, upload_id, 'owner')
+
+
+def _upload_owner(upload_id):
+    try:
+        with open(_owner_path(upload_id)) as f:
+            return f.read()
+    except FileNotFoundError:
+        return None
+
+
+def _claim_upload(upload_id, code):
+    """The first chunk records which key owns an upload; later chunks must match."""
+    os.makedirs(os.path.join(STAGING_DIR, upload_id), exist_ok=True)
+    # Write then link, so a parallel chunk never reads a half-written owner file
+    tmp = f'{_owner_path(upload_id)}.{uuid.uuid4().hex}'
+    with open(tmp, 'w') as f:
+        f.write(code)
+    try:
+        os.link(tmp, _owner_path(upload_id))
+        return True
+    except FileExistsError:
+        return _upload_owner(upload_id) == code
+    finally:
+        os.unlink(tmp)
 
 
 def _session_dirs(upload_id):

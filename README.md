@@ -21,7 +21,7 @@ A key looks like `CODE#SECRET`.
 
 | Path | What it does |
 |---|---|
-| `/upload` | Enter `CODE#SECRET`, pick files, upload. Checks the key first, then shows the destination vault, the file going up, progress, speed and time left, and can be cancelled. Ends on **My uploads**, logging in with that key if needed. |
+| `/upload` | Enter `CODE#SECRET`, pick files, upload; a back link returns to **My uploads**. Checks the key first, then shows the destination vault, the file going up, progress, speed and time left, and can be cancelled. Ends on **My uploads**, logging in with that key if needed. |
 | `/files` | **My uploads**: log in with `CODE#SECRET`; lists uploads with decrypted names, space used against the key's limit, and login history. |
 | `/files/CODE#SECRET` | Logs straight in. |
 | `/<upload-id>#<upload-key>` | Share page: decrypts the names and downloads the files. |
@@ -71,9 +71,21 @@ A size limit counts everything uploaded with the key plus the upload in progress
 upload that would go over is stopped and its partial data deleted.
 
 The server writes each chunk straight into its file at the offset the browser gives,
-so chunks can arrive in any order. Finalize checks every chunk arrived. A failed
-chunk is retried three times; a cancelled or failed upload is deleted, and anything
-unfinished and untouched for a day is swept away on the next finish or cancel.
+so chunks can arrive in any order, and records each one that lands. The first chunk
+also records which key owns the upload; only that key can add to it, ask about it,
+finish it or cancel it.
+
+The page keeps four chunks in flight. A chunk that fails is retried five times, and
+one that makes no progress for a minute is abandoned and resent. Before finishing,
+the page asks the server which chunks it has (`/upload/status`) and resends any gaps,
+then finalize checks every chunk arrived.
+
+An upload that stops (a closed tab, a crash, a network drop) can be resumed: choose
+the same files with the same key and the page sends only what is missing. It
+remembers unfinished uploads in the browser by key code and file name, size and
+date, with a hash of the upload's key to check the secret matches; the secret itself
+is not stored. Cancel deletes the upload instead. Anything unfinished and untouched
+for a day is swept away on the next finish or cancel.
 
 ## Running it
 
@@ -101,7 +113,7 @@ HTTPS.
 | `static/` images | `favicon.ico`, `icon-512.png`, `apple-touch-icon.png`; `banner.jpg` (this README), `og.jpg` (1280×640 project image and link preview) and `page-bg.jpg` (page background behind a semi-opaque content panel; its edges match `--page` in `base.html`). |
 | `templates/` | Pages. |
 | `tests/e2e_roundtrip.mjs` | Round trip against a running server: `node tests/e2e_roundtrip.mjs http://127.0.0.1:5001 'CODE#SECRET'`. Run it from this directory with a throwaway key; it leaves one upload behind to delete. |
-| `tests/browser_upload.mjs` | Drives a real headless Chrome through the upload page with a throwaway key: `node tests/browser_upload.mjs http://localhost:5001 'CODE#SECRET' [--no-login]`. Checks it lands on My uploads with the name decrypted. |
+| `tests/browser_upload.mjs` | Drives a real headless Chrome through the upload page with a throwaway key: `node tests/browser_upload.mjs http://localhost:5001 'CODE#SECRET' [--no-login \| --cancel \| --stall \| --resume]`. Covers a normal upload, uploading without logging in, cancelling, a chunk that hangs, and resuming after an abandoned upload. |
 
 Created at runtime and kept out of git: `transfer.db` (keys and login history),
 `secret_key` (signs the session cookie), `uploads/`, `metadata/` and `staging/`.

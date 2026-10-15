@@ -2,6 +2,7 @@
 {% block title %}Upload — transfer.lyr4.net{% endblock %}
 
 {% block page_head %}
+<a class="back-link" href="/files">← My uploads</a>
 <h1>Upload files</h1>
 <p class="subtitle">Enter your full key, <code>CODE#SECRET</code>. Files are encrypted in your browser before upload.</p>
 {% if label %}<p class="subtitle" style="margin-top: 0.4rem;">Vault Name: <span style="color: var(--text); font-weight: 500;">{{ label }}</span></p>{% endif %}
@@ -19,7 +20,6 @@
     <input type="file" id="file-input" multiple>
 
     <button id="upload-btn" onclick="startUpload()">Upload</button>
-    <a class="btn" href="/files" style="background: none; border: 1px solid var(--border); color: var(--text-dim); margin-left: 0.5rem;">My uploads</a>
   </div>
 
   <div id="progress-area" style="display:none;">
@@ -38,10 +38,14 @@
 <script src="{{ asset('e2e.js') }}"></script>
 <script>
 const CHUNK_SIZE = E2E.CHUNK_SIZE;
-const PARALLEL = 4;    // chunks in flight at once
-const RETRIES = 3;     // per chunk, after the first try
+const PARALLEL = 4;      // chunks in flight at once
+const RETRIES = 5;       // per chunk, after the first try
+let STALL_MS = 60000;    // a chunk with no upload progress for this long is abandoned and resent
+const SWEEPS = 3;        // rounds of "ask the server what's missing and resend it" before finishing
+const PENDING_KEY = 'transfer_pending';
+const PENDING_TTL = 24 * 3600 * 1000;  // the server sweeps unfinished uploads after a day
 
-let current = null;    // the upload in progress: { uploadId, authCode, xhrs, cancelled }
+let current = null;      // the upload in progress: { uploadId, authCode, xhrs, cancelled }
 
 function fmtSize(bytes) {
   const units = ['B','KB','MB','GB','TB'];
@@ -68,25 +72,62 @@ function showForm(message) {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+async function postJSON(path, body) {
+  const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify(body) });
+  return res.json();
+}
+
+// Unfinished uploads this browser can resume, keyed by key code + file details.
+// Holds the upload id and a hash of its derived key, never the secret.
+function readPending() {
+  try {
+    const all = JSON.parse(localStorage.getItem(PENDING_KEY) || '{}');
+    for (const [k, v] of Object.entries(all)) if (Date.now() - v.savedAt > PENDING_TTL) delete all[k];
+    return all;
+  } catch (e) { return {}; }
+}
+
+function writePending(all) {
+  try { localStorage.setItem(PENDING_KEY, JSON.stringify(all)); } catch (e) {}
+}
+
+function fingerprint(code, files) {
+  return code + '|' + files.map(f => `${f.name}:${f.size}:${f.lastModified}`).join('/');
+}
+
+async function keyCheck(keyBytes) {
+  return E2E.b64u(await crypto.subtle.digest('SHA-256', keyBytes));
+}
+
 // One chunk over XHR, which (unlike fetch) reports upload progress. 4xx answers are
-// final; network errors and 5xx are worth retrying.
+// final; network errors, 5xx and stalls are worth retrying.
 function postChunk(fd, onProgress, xhrs) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhrs.add(xhr);
+    let last = Date.now();
+    let stalled = false;
+    const watchdog = setInterval(() => {
+      if (Date.now() - last > STALL_MS) { stalled = true; xhr.abort(); }
+    }, 5000);
+    const done = () => { clearInterval(watchdog); xhrs.delete(xhr); };
     xhr.open('POST', '/upload/chunk');
     xhr.responseType = 'json';
-    xhr.upload.onprogress = e => onProgress(e.loaded / (e.total || 1));
+    xhr.upload.onprogress = e => { last = Date.now(); onProgress(e.loaded / (e.total || 1)); };
     xhr.onload = () => {
-      xhrs.delete(xhr);
+      done();
       const data = xhr.response || {};
       if (xhr.status >= 200 && xhr.status < 300) return resolve(data);
       const err = new Error(data.error || `server answered ${xhr.status}`);
       err.final = xhr.status >= 400 && xhr.status < 500;
       reject(err);
     };
-    xhr.onerror = () => { xhrs.delete(xhr); reject(new Error('network error')); };
-    xhr.onabort = () => { xhrs.delete(xhr); reject(Object.assign(new Error('cancelled'), { final: true })); };
+    xhr.onerror = () => { done(); reject(new Error('network error')); };
+    xhr.onabort = () => {
+      done();
+      reject(stalled ? new Error('stalled') : Object.assign(new Error('cancelled'), { final: true }));
+    };
     xhr.send(fd);
   });
 }
@@ -105,13 +146,12 @@ async function startUpload() {
   document.getElementById('progress-area').style.display = 'block';
   document.getElementById('cancel-btn').disabled = false;
   document.getElementById('progress-vault').textContent = '';
+  document.getElementById('progress-detail').textContent = '';
   document.getElementById('progress-label').textContent = 'Checking key…';
 
   let vault;
   try {
-    const res = await fetch('/upload/check', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                               body: JSON.stringify({ auth_code: authCode }) });
-    vault = await res.json();
+    vault = await postJSON('/upload/check', { auth_code: authCode });
   } catch (e) {
     vault = { error: 'Network error while checking the key' };
   }
@@ -123,24 +163,52 @@ async function startUpload() {
   vaultName.textContent = vault.label || authCode;
   vaultLine.append(vaultName);
 
-  const uploadId = crypto.randomUUID();
+  // Resume an unfinished upload of the same files with the same key, if this browser has one
+  const print = fingerprint(authCode, files);
+  const pending = readPending();
+  let uploadId = crypto.randomUUID();
+  let keyBytes = await E2E.uploadKeyBytes(secret, uploadId);
+  let received = {};
+  let resumed = false;
+  const prior = pending[print];
+  if (prior) {
+    const priorKey = await E2E.uploadKeyBytes(secret, prior.uploadId);
+    if (await keyCheck(priorKey) === prior.keyCheck) {
+      let status;
+      try { status = await postJSON('/upload/status', { auth_code: authCode, upload_id: prior.uploadId }); }
+      catch (e) { status = { error: 'network' }; }
+      if (!status.error && !status.finished) {
+        uploadId = prior.uploadId;
+        keyBytes = priorKey;
+        received = status.received || {};
+        resumed = true;
+      }
+    }
+  }
+  pending[print] = { uploadId, keyCheck: await keyCheck(keyBytes), savedAt: Date.now() };
+  writePending(pending);
+  const forget = () => { const all = readPending(); delete all[print]; writePending(all); };
+
   const upload = current = { uploadId, authCode, xhrs: new Set(), cancelled: false };
-  const key = await E2E.aesKey(await E2E.uploadKeyBytes(secret, uploadId));
+  const key = await E2E.aesKey(keyBytes);
 
   // Every chunk of every file, in order; PARALLEL workers take them from the front
-  const tasks = [];
+  const allTasks = [];
   const described = [];
   for (const [fi, file] of files.entries()) {
     const total = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
     described.push({ index: fi, chunk_total: total, name_enc: await E2E.sealName(key, fi, file.name) });
     for (let ci = 0; ci < total; ci++) {
       const start = ci * CHUNK_SIZE;
-      tasks.push({ file, fi, ci, total, start, end: Math.min(start + CHUNK_SIZE, file.size) });
+      allTasks.push({ file, fi, ci, total, start, end: Math.min(start + CHUNK_SIZE, file.size) });
     }
   }
+  const has = (got, t) => (got[String(t.fi)] || []).includes(t.ci);
 
   const totalBytes = files.reduce((s, f) => s + f.size, 0);
   let doneBytes = 0;
+  for (const t of allTasks) if (has(received, t)) doneBytes += t.end - t.start;
+  const resumedBytes = doneBytes;
   let currentFile = 0;                 // the file of the chunk most recently started
   const inFlight = new Map();          // task -> plaintext bytes sent so far
   const startedAt = performance.now();
@@ -149,11 +217,11 @@ async function startUpload() {
     for (const b of inFlight.values()) sent += b;
     const pct = totalBytes ? sent / totalBytes * 100 : 100;
     const elapsed = (performance.now() - startedAt) / 1000;
-    const rate = sent / Math.max(elapsed, 0.001);
+    const rate = (sent - resumedBytes) / Math.max(elapsed, 0.001);
     document.getElementById('progress-bar').style.width = pct.toFixed(1) + '%';
     const position = files.length > 1 ? ` (${currentFile + 1} of ${files.length})` : '';
     document.getElementById('progress-label').textContent =
-      `Uploading ${files[currentFile].name}${position}… ${pct.toFixed(1)}%`;
+      `${resumed ? 'Resuming' : 'Uploading'} ${files[currentFile].name}${position}… ${pct.toFixed(1)}%`;
     document.getElementById('progress-detail').textContent =
       `${fmtSize(sent)} of ${fmtSize(totalBytes)} · ${fmtSize(rate)}/s · ${fmtDuration((totalBytes - sent) / rate)} left`;
   }, 250);
@@ -179,28 +247,38 @@ async function startUpload() {
       } catch (e) {
         inFlight.delete(task);
         if (e.final || upload.cancelled || attempt >= RETRIES) throw e;
-        await sleep(1000 * 2 ** attempt);
+        await sleep(1000 * 2 ** Math.min(attempt, 4));
       }
     }
     inFlight.delete(task);
     doneBytes += size;
   }
 
-  let next = 0;
-  async function worker() {
-    while (!upload.cancelled && next < tasks.length) await send(tasks[next++]);
+  async function sendAll(tasks) {
+    let next = 0;
+    const worker = async () => { while (!upload.cancelled && next < tasks.length) await send(tasks[next++]); };
+    await Promise.all(Array.from({ length: Math.min(PARALLEL, tasks.length) }, worker));
   }
 
   try {
-    await Promise.all(Array.from({ length: Math.min(PARALLEL, tasks.length) }, worker));
+    await sendAll(allTasks.filter(t => !has(received, t)));
+    // Ask the server what it actually has, and resend anything missing
+    for (let round = 0; round < SWEEPS; round++) {
+      if (upload.cancelled) break;
+      const status = await postJSON('/upload/status', { auth_code: authCode, upload_id: uploadId });
+      if (status.error) throw Object.assign(new Error(status.error), { final: true });
+      const missing = allTasks.filter(t => !has(status.received || {}, t));
+      if (!missing.length) break;
+      for (const t of missing) doneBytes -= t.end - t.start;
+      await sendAll(missing);
+    }
   } catch (e) {
     clearInterval(ticker);
     if (upload.cancelled) return;   // cancelUpload has already reset the page
     upload.cancelled = true;
     for (const xhr of upload.xhrs) xhr.abort();
     current = null;
-    discard(upload);
-    return showForm(`Upload failed: ${e.message}. Nothing was kept; try again.`);
+    return showForm(`Upload stopped: ${e.message}. What was sent is kept: choose the same files with the same key and upload again to resume.`);
   }
   clearInterval(ticker);
   if (upload.cancelled) return;
@@ -209,18 +287,14 @@ async function startUpload() {
   document.getElementById('progress-label').textContent = 'Finishing…';
   let data;
   try {
-    const res = await fetch('/upload/finalize', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ auth_code: authCode, upload_id: uploadId, files: described,
-                             chunk_size: CHUNK_SIZE, encrypted: true }),
-    });
-    data = await res.json();
+    data = await postJSON('/upload/finalize', { auth_code: authCode, upload_id: uploadId, files: described,
+                                                chunk_size: CHUNK_SIZE, encrypted: true });
   } catch (e) {
     data = { error: 'Network error while finishing the upload' };
   }
   current = null;
-  if (data.error) { discard(upload); return showForm(data.error); }
+  if (data.error) return showForm(`${data.error}. Upload again with the same files and key to resume.`);
+  forget();
 
   // Back to My uploads, where the new upload is listed with its share link. Logged in
   // with this key already: go straight there; otherwise log in with the key just used.
@@ -229,31 +303,30 @@ async function startUpload() {
   window.location.href = loggedIn ? '/files' : `/files/${encodeURIComponent(authCode)}#${secret}`;
 }
 
-// Ask the server to delete whatever an unfinished upload has written
-function discard(upload) {
-  fetch('/upload/cancel', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ auth_code: upload.authCode, upload_id: upload.uploadId }),
-    keepalive: true,
-  }).catch(() => {});
-}
-
 function cancelUpload() {
   const upload = current;
   if (!upload) return;
   upload.cancelled = true;
   current = null;
   for (const xhr of upload.xhrs) xhr.abort();
-  discard(upload);
+  // Cancel means throw it away: delete it on the server and forget it here
+  fetch('/upload/cancel', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ auth_code: upload.authCode, upload_id: upload.uploadId }),
+    keepalive: true,
+  }).catch(() => {});
+  const all = readPending();
+  for (const [k, v] of Object.entries(all)) if (v.uploadId === upload.uploadId) delete all[k];
+  writePending(all);
   showForm('Upload cancelled. Nothing was kept.');
 }
 
-// Leaving mid-upload loses it, so ask first; if they leave anyway, clean up
+// Leaving mid-upload stops it; what was sent stays on the server for a day, and
+// choosing the same files with the same key resumes it
 window.addEventListener('beforeunload', e => {
   if (current) { e.preventDefault(); e.returnValue = ''; }
 });
-window.addEventListener('pagehide', () => { if (current) discard(current); });
 
 // Logged in from My uploads: rebuild CODE#SECRET from the session code and this tab's secret
 (function () {
