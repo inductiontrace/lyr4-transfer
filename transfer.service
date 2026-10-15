@@ -5,7 +5,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/home/operations/Lyra/interfaces/transfer
-ExecStart=/home/operations/Lyra/.venv/bin/gunicorn -w 2 -b 0.0.0.0:5001 --timeout 120 --access-logfile - app:app
+ExecStart=/home/operations/Lyra/.venv/bin/gunicorn -w 2 --worker-class gthread --threads 8 -b 0.0.0.0:5001 --timeout 120 --access-logfile - app:app
 Restart=always
 Environment=PYTHONUNBUFFERED=1
 

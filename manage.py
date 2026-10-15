@@ -37,7 +37,7 @@ UPLOADS_DIR = os.path.join(BASE_DIR, 'uploads')
 METADATA_DIR = os.path.join(BASE_DIR, 'metadata')
 
 # Mirrors static/e2e.js: chunk size, HKDF salt/info and the AAD strings.
-E2E_CHUNK = 50 * 1024 * 1024
+E2E_LEGACY_CHUNK = 50 * 1024 * 1024  # uploads whose metadata records no chunk_size
 E2E_OVERHEAD = 12 + 16  # iv + GCM tag
 
 
@@ -166,12 +166,12 @@ def unseal(aes, sealed, aad):
     return aes.decrypt(sealed[:12], sealed[12:], aad.encode())
 
 
-def decrypt_file(aes, src, dest_dir, f):
+def decrypt_file(aes, src, dest_dir, f, chunk_size):
     idx = f['index']
     name_enc = base64.urlsafe_b64decode(f['name_enc'] + '=' * (-len(f['name_enc']) % 4))
     name = os.path.basename(unseal(aes, name_enc, f'name:{idx}').decode()) or f'file{idx}'
     size = os.path.getsize(src)
-    stride = E2E_CHUNK + E2E_OVERHEAD
+    stride = chunk_size + E2E_OVERHEAD
     total = max(1, -(-size // stride))
     os.makedirs(dest_dir, exist_ok=True)
     with open(src, 'rb') as inp, open(os.path.join(dest_dir, name), 'wb') as out:
@@ -195,7 +195,8 @@ def cmd_decrypt(out_dir='decrypted', only_uuid=None):
         dest_dir = os.path.join(out_dir, f"{m['uploaded_at'][:10]}_{m['uuid'][:8]}")
         try:
             for f in m['files']:
-                decrypt_file(aes, os.path.join(UPLOADS_DIR, m['uuid'], f['filename']), dest_dir, f)
+                decrypt_file(aes, os.path.join(UPLOADS_DIR, m['uuid'], f['filename']), dest_dir, f,
+                             m.get('chunk_size', E2E_LEGACY_CHUNK))
         except InvalidTag:
             print(f"  {m['uuid']}: the secret does not open this upload (wrong secret, or the file was altered)")
 

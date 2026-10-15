@@ -20,16 +20,17 @@ for (const [fi, f] of files.entries()) {
   for (let ci = 0; ci < total; ci++) {
     const plain = f.data.subarray(ci * E2E.CHUNK_SIZE, (ci + 1) * E2E.CHUNK_SIZE);
     const fd = new FormData();
-    for (const [k, v] of Object.entries({ auth_code: code, upload_id: uploadId, file_index: fi, chunk_index: ci, chunk_total: total, filename: `f${fi}` }))
+    for (const [k, v] of Object.entries({ auth_code: code, upload_id: uploadId, file_index: fi, chunk_index: ci, chunk_total: total,
+                                           offset: ci * (E2E.CHUNK_SIZE + E2E.OVERHEAD) }))
       fd.append(k, String(v));
     fd.append('chunk', new Blob([await E2E.seal(key, plain, E2E.chunkAad(fi, ci, total))]), 'blob');
     const r = await (await fetch(`${base}/upload/chunk`, { method: 'POST', body: fd })).json();
     if (r.error) throw new Error(r.error);
-    if (r.done) finished.push({ filename: r.filename, index: fi, name_enc: await E2E.sealName(key, fi, f.name), size: 1 });
   }
+  finished.push({ index: fi, chunk_total: total, name_enc: await E2E.sealName(key, fi, f.name), size: 1 });
 }
 const fin = await (await fetch(`${base}/upload/finalize`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ auth_code: code, upload_id: uploadId, files: finished, encrypted: true }) })).json();
+  body: JSON.stringify({ auth_code: code, upload_id: uploadId, files: finished, chunk_size: E2E.CHUNK_SIZE, encrypted: true }) })).json();
 if (fin.error) throw new Error(fin.error);
 console.log('uploaded', uploadId, 'share key', E2E.b64u(keyBytes));
 
@@ -43,7 +44,7 @@ console.log('plaintext marker on disk:', onDisk.some(b => b.includes('MARKER-PLA
 const shareKey = await E2E.aesKey(E2E.unb64u(E2E.b64u(keyBytes)));
 for (const f of meta.files) {
   const name = await E2E.openName(shareKey, f.index, f.name_enc);
-  const { total, stride, plainSize } = E2E.layout(f.size);
+  const { total, stride, plainSize } = E2E.layout(f.size, meta.chunk_size);
   const parts = [];
   for (let ci = 0; ci < total; ci++) {
     const end = Math.min((ci + 1) * stride, f.size) - 1;
@@ -55,7 +56,7 @@ for (const f of meta.files) {
 }
 
 // Tamper: ask for file 1's chunk 1 but claim it is chunk 0
-const f1 = meta.files[1], { stride, total } = E2E.layout(f1.size);
+const f1 = meta.files[1], { stride, total } = E2E.layout(f1.size, meta.chunk_size);
 const res = await fetch(`${base}/dl/${uploadId}/${f1.filename}`, { headers: { Range: `bytes=${stride}-${f1.size - 1}` } });
 try { await E2E.open(shareKey, await res.arrayBuffer(), E2E.chunkAad(1, 0, total)); console.log('reordered chunk: ACCEPTED (bad)'); }
 catch (e) { console.log('reordered chunk: rejected'); }

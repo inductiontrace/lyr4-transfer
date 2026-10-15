@@ -1,5 +1,6 @@
-// Drives a real Chrome through the upload page: node tests/browser_upload.mjs <base-url> <CODE#SECRET> [--no-login]
-// Logs in, uploads a generated file with the page's own script, and checks where it lands.
+// Drives a real Chrome through the upload page: node tests/browser_upload.mjs <base-url> <CODE#SECRET> [--no-login | --cancel]
+// Logs in, uploads a generated 40 MB file (three chunks in flight) with the page's own script,
+// and checks where it lands. --cancel cancels mid-upload instead and reports what the page shows.
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -32,11 +33,26 @@ try {
   else console.log('key prefilled with secret:', await evaluate(`document.getElementById('auth_code').value === ${JSON.stringify(fullKey)}`));
   await evaluate(`(() => {
     const dt = new DataTransfer();
-    dt.items.add(new File(['hello from a real browser upload'], 'browser test.txt', { type: 'text/plain' }));
+    const body = new Uint8Array(40 * 1024 * 1024); body.set(new TextEncoder().encode('hello from a real browser upload'));
+    dt.items.add(new File([body], 'browser test.bin'));
     document.getElementById('file-input').files = dt.files;
   })()`);
-  await evaluate('startUpload()');
-  await sleep(2500);
+  if (flag === '--cancel') {
+    // Slow the upload to 2 MB/s so there is something in flight to cancel
+    await send('Network.enable');
+    await send('Network.emulateNetworkConditions', { offline: false, latency: 20,
+      downloadThroughput: -1, uploadThroughput: 2 * 1024 * 1024 });
+  }
+  send('Runtime.evaluate', { expression: 'startUpload()' });
+  if (flag === '--cancel') {
+    await sleep(3000);
+    console.log('progress before cancel:', await evaluate(`document.getElementById('progress-detail').textContent`));
+    await evaluate('cancelUpload()');
+    console.log('page after cancel:', await evaluate(`document.getElementById('error-box').textContent`));
+    ws.close();
+    process.exit(0);
+  }
+  for (let i = 0; i < 60 && !(await evaluate('location.pathname')).startsWith('/files'); i++) await sleep(250);
   const url = await evaluate('location.href');
   console.log('landed on:', url);
   const names = await evaluate(`[...document.querySelectorAll('a.upload-row .file-name')].map(e => e.textContent)`);

@@ -5,7 +5,6 @@ import shutil
 import sqlite3
 from datetime import datetime, timezone
 from flask import Flask, request, render_template, abort, send_from_directory, url_for, jsonify, session, redirect
-from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -35,8 +34,8 @@ def load_secret_key():
 app.secret_key = load_secret_key()
 app.config['SESSION_COOKIE_SECURE'] = True
 
-# Each chunk is ≤50 MB; allow a little headroom
-app.config['MAX_CONTENT_LENGTH'] = 60 * 1024 * 1024  # 60 MB per request
+# Chunks are 16 MB of ciphertext plus form overhead
+app.config['MAX_CONTENT_LENGTH'] = 20 * 1024 * 1024
 
 for d in (UPLOADS_DIR, METADATA_DIR, STAGING_DIR):
     os.makedirs(d, exist_ok=True)
@@ -150,122 +149,124 @@ def logout():
 
 @app.route('/upload/chunk', methods=['POST'])
 def upload_chunk():
-    """Accept a single chunk of a file within a multi-file upload session."""
-    auth_code   = request.form.get('auth_code', '').strip()
-    upload_id   = request.form.get('upload_id', '').strip()
-    filename    = request.form.get('filename', '').strip()
+    """Write one chunk straight into its file at the offset the browser gives.
+    Chunks can arrive in any order and in parallel; a marker file per chunk lets
+    finalize check that every one arrived."""
+    auth_code = request.form.get('auth_code', '').strip()
+    upload_id = request.form.get('upload_id', '').strip()
 
     try:
         uuid.UUID(upload_id)
     except ValueError:
         return jsonify({'error': 'Invalid upload session'}), 400
 
-    # The indexes become path components, so only plain integers get through
+    # The indexes become path components and the offset a file position, so only plain integers get through
     try:
         file_index  = int(request.form.get('file_index', '0'))
         chunk_index = int(request.form.get('chunk_index', '0'))
         chunk_total = int(request.form.get('chunk_total', '1'))
+        offset      = int(request.form.get('offset', '0'))
     except ValueError:
         return jsonify({'error': 'Invalid chunk position'}), 400
-    if file_index < 0 or not 0 <= chunk_index < chunk_total:
+    if file_index < 0 or not 0 <= chunk_index < chunk_total or offset < 0:
         return jsonify({'error': 'Invalid chunk position'}), 400
 
     # Validate auth on every chunk (no increment yet — charged on completion)
     if not check_auth_code(auth_code):
         return jsonify({'error': 'Invalid upload key'}), 403
+    if os.path.exists(os.path.join(METADATA_DIR, f'{upload_id}.json')):
+        return jsonify({'error': 'This upload is already finished'}), 409
 
     chunk_file = request.files.get('chunk')
     if not chunk_file:
         return jsonify({'error': 'No chunk data'}), 400
-
-    # Save chunk to staging/<upload_id>_<file_index>/chunk_NNNNNN
-    staging_dir = os.path.join(STAGING_DIR, f'{upload_id}_{file_index}')
-    os.makedirs(staging_dir, exist_ok=True)
-    chunk_file.save(os.path.join(staging_dir, f'chunk_{chunk_index:06d}'))
+    data = chunk_file.read()
 
     max_bytes = _key_row(auth_code)['max_bytes']
     if max_bytes is not None:
         committed = _committed_bytes(_uploads_for(auth_code))
-        if committed + _session_bytes(upload_id) > max_bytes:
+        if committed + _session_bytes(upload_id) + len(data) > max_bytes:
             _discard_session(upload_id)
             return jsonify({'error': f"This upload would go over the key's {_fmt_size(max_bytes)} "
                                      f"limit ({_fmt_size(committed)} already used)."}), 413
 
-    # Not the last chunk — ack and continue
-    if chunk_index < chunk_total - 1:
-        return jsonify({'done': False, 'received': chunk_index})
-
-    # ── Last chunk: assemble file into uploads/<upload_id>/<filename> ─────────
-    safe_filename = secure_filename(filename)
-    if not safe_filename:
-        shutil.rmtree(staging_dir, ignore_errors=True)
-        return jsonify({'error': 'Invalid filename'}), 400
-
     upload_dir = os.path.join(UPLOADS_DIR, upload_id)
+    marker_dir = os.path.join(STAGING_DIR, upload_id, str(file_index))
     os.makedirs(upload_dir, exist_ok=True)
-
-    # Deduplicate filenames within the same upload session
-    final_path = os.path.join(upload_dir, safe_filename)
-    if os.path.exists(final_path):
-        name, ext = os.path.splitext(safe_filename)
-        counter = 1
-        while os.path.exists(final_path):
-            safe_filename = f'{name}_{counter}{ext}'
-            final_path = os.path.join(upload_dir, safe_filename)
-            counter += 1
-
+    os.makedirs(marker_dir, exist_ok=True)
+    fd = os.open(os.path.join(upload_dir, f'f{file_index}'), os.O_WRONLY | os.O_CREAT, 0o644)
     try:
-        with open(final_path, 'wb') as out:
-            for i in range(chunk_total):
-                cp = os.path.join(staging_dir, f'chunk_{i:06d}')
-                with open(cp, 'rb') as cf:
-                    shutil.copyfileobj(cf, out)
-    except Exception as e:
-        return jsonify({'error': f'Assembly failed: {e}'}), 500
+        os.pwrite(fd, data, offset)
     finally:
-        shutil.rmtree(staging_dir, ignore_errors=True)
+        os.close(fd)
+    open(os.path.join(marker_dir, str(chunk_index)), 'w').close()
+    return jsonify({'received': chunk_index})
 
-    size = os.path.getsize(final_path)
-    return jsonify({'done': True, 'filename': safe_filename, 'size': size})
+
+@app.route('/upload/cancel', methods=['POST'])
+def upload_cancel():
+    """Throw away an unfinished upload. A finished one is left alone."""
+    auth_code = request.json.get('auth_code', '').strip()
+    upload_id = request.json.get('upload_id', '').strip()
+    try:
+        uuid.UUID(upload_id)
+    except ValueError:
+        return jsonify({'error': 'Invalid upload session'}), 400
+    if not check_auth_code(auth_code):
+        return jsonify({'error': 'Invalid upload key'}), 403
+    if os.path.exists(os.path.join(METADATA_DIR, f'{upload_id}.json')):
+        return jsonify({'error': 'This upload is already finished'}), 409
+    _discard_session(upload_id)
+    _sweep_abandoned()
+    return jsonify({'cancelled': True})
 
 
 @app.route('/upload/finalize', methods=['POST'])
 def upload_finalize():
-    """Finalize a multi-file upload session by writing its metadata. The browser
+    """Check every chunk arrived, then write the upload's metadata. The browser
     builds the share link itself, since only it holds the key that goes after '#'."""
-    auth_code = request.json.get('auth_code', '').strip()
-    upload_id = request.json.get('upload_id', '').strip()
-    files     = request.json.get('files', [])
+    auth_code  = request.json.get('auth_code', '').strip()
+    upload_id  = request.json.get('upload_id', '').strip()
+    files      = request.json.get('files', [])
+    chunk_size = request.json.get('chunk_size')
 
     try:
         uuid.UUID(upload_id)
     except ValueError:
         return jsonify({'error': 'Invalid upload session'}), 400
-
-    if not consume_auth_code(auth_code):
+    if not isinstance(chunk_size, int) or chunk_size <= 0 or not files:
+        return jsonify({'error': 'Invalid upload description'}), 400
+    if not check_auth_code(auth_code):
         return jsonify({'error': 'Invalid upload key'}), 403
 
     upload_dir = os.path.join(UPLOADS_DIR, upload_id)
-    if not os.path.isdir(upload_dir):
-        return jsonify({'error': 'No files found for this session'}), 400
-
-    # Sizes come from disk, not the browser, so the key's size limit can't be understated
+    stored = []
     for f in files:
-        name = f.get('filename', '')
-        path = os.path.join(upload_dir, name)
-        if not name or secure_filename(name) != name or not os.path.isfile(path):
-            return jsonify({'error': 'Unknown file in upload'}), 400
-        f['size'] = os.path.getsize(path)
+        index, total = f.get('index'), f.get('chunk_total')
+        if not isinstance(index, int) or not isinstance(total, int) or index < 0 or total < 1:
+            return jsonify({'error': 'Invalid upload description'}), 400
+        path = os.path.join(upload_dir, f'f{index}')
+        marker_dir = os.path.join(STAGING_DIR, upload_id, str(index))
+        arrived = set(os.listdir(marker_dir)) if os.path.isdir(marker_dir) else set()
+        if not os.path.isfile(path) or arrived != {str(i) for i in range(total)}:
+            return jsonify({'error': f'File {index + 1} is missing chunks; upload it again'}), 400
+        # Size comes from disk, not the browser, so the key's size limit can't be understated
+        stored.append({'filename': f'f{index}', 'index': index, 'name_enc': f.get('name_enc', ''),
+                       'size': os.path.getsize(path)})
 
+    consume_auth_code(auth_code)
     meta = {
         'uuid': upload_id,
-        'files': files,
+        'files': stored,
         'uploaded_at': datetime.now(timezone.utc).isoformat(),
         'auth_code': auth_code,
         'encrypted': bool(request.json.get('encrypted')),
+        'chunk_size': chunk_size,
     }
     with open(os.path.join(METADATA_DIR, f'{upload_id}.json'), 'w') as f:
         json.dump(meta, f, indent=2)
+    shutil.rmtree(os.path.join(STAGING_DIR, upload_id), ignore_errors=True)
+    _sweep_abandoned()
     return jsonify({'done': True})
 
 
@@ -294,7 +295,7 @@ def not_found(e):
 
 @app.errorhandler(413)
 def too_large(e):
-    return jsonify({'error': 'Chunk too large. Maximum chunk size is 50 MB.'}), 413
+    return jsonify({'error': 'Chunk too large. Maximum chunk size is 16 MB.'}), 413
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -323,11 +324,8 @@ def _dir_bytes(path):
 
 
 def _session_dirs(upload_id):
-    """Everything an unfinished upload has written: assembled files and staged chunks."""
-    dirs = [os.path.join(UPLOADS_DIR, upload_id)]
-    dirs += [os.path.join(STAGING_DIR, d) for d in os.listdir(STAGING_DIR)
-             if d.startswith(f'{upload_id}_')]
-    return dirs
+    """Everything an unfinished upload has written: its files and its chunk markers."""
+    return [os.path.join(UPLOADS_DIR, upload_id), os.path.join(STAGING_DIR, upload_id)]
 
 
 def _session_bytes(upload_id):
@@ -337,6 +335,21 @@ def _session_bytes(upload_id):
 def _discard_session(upload_id):
     for d in _session_dirs(upload_id):
         shutil.rmtree(d, ignore_errors=True)
+
+
+ABANDONED_AFTER = 24 * 3600
+
+
+def _sweep_abandoned():
+    """Delete unfinished uploads untouched for a day: closed tabs, crashes, and
+    chunks that landed after a cancel."""
+    cutoff = datetime.now(timezone.utc).timestamp() - ABANDONED_AFTER
+    for parent in (UPLOADS_DIR, STAGING_DIR):
+        for name in os.listdir(parent):
+            path = os.path.join(parent, name)
+            finished = os.path.exists(os.path.join(METADATA_DIR, f'{name}.json'))
+            if os.path.isdir(path) and not (parent == UPLOADS_DIR and finished) and os.path.getmtime(path) < cutoff:
+                shutil.rmtree(path, ignore_errors=True)
 
 
 def _uploads_for(code):

@@ -8,7 +8,8 @@
 // a chunk to its file index, chunk index and chunk count, so the server cannot
 // reorder, swap or truncate chunks without decryption failing.
 (function () {
-  const CHUNK_SIZE = 50 * 1024 * 1024;   // plaintext bytes per chunk
+  const CHUNK_SIZE = 16 * 1024 * 1024;   // plaintext bytes per chunk for new uploads
+  const LEGACY_CHUNK_SIZE = 50 * 1024 * 1024;  // uploads whose metadata records no chunk_size
   const OVERHEAD = 12 + 16;              // iv + GCM tag
   const enc = new TextEncoder();
   const dec = new TextDecoder();
@@ -67,13 +68,14 @@
   }
 
   // Chunk count and plaintext size, recovered from the stored ciphertext size.
-  function layout(cipherSize) {
-    const total = Math.max(1, Math.ceil(cipherSize / (CHUNK_SIZE + OVERHEAD)));
-    return { total, plainSize: cipherSize - total * OVERHEAD, stride: CHUNK_SIZE + OVERHEAD };
+  function layout(cipherSize, chunkSize = LEGACY_CHUNK_SIZE) {
+    const stride = chunkSize + OVERHEAD;
+    const total = Math.max(1, Math.ceil(cipherSize / stride));
+    return { total, plainSize: cipherSize - total * OVERHEAD, stride };
   }
 
   globalThis.E2E = {
-    CHUNK_SIZE, OVERHEAD, b64u, unb64u, splitKey, uploadKeyBytes, aesKey,
+    CHUNK_SIZE, LEGACY_CHUNK_SIZE, OVERHEAD, b64u, unb64u, splitKey, uploadKeyBytes, aesKey,
     seal, open, chunkAad, sealName, openName, layout,
   };
 })();

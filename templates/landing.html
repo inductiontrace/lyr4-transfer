@@ -53,6 +53,7 @@
 <script src="/static/e2e.js"></script>
 <script>
 const UPLOAD_ID = {{ file_uuid | tojson }};
+const CHUNK_SIZE = {{ meta.chunk_size | default(none) | tojson }} || E2E.LEGACY_CHUNK_SIZE;
 const names = {};
 
 function fail(msg) {
@@ -71,7 +72,7 @@ function fmtSize(bytes) {
 async function download(btn, key) {
   const idx = Number(btn.dataset.index);
   const cipherSize = Number(btn.dataset.cipherSize);
-  const { total, stride } = E2E.layout(cipherSize);
+  const { total, stride } = E2E.layout(cipherSize, CHUNK_SIZE);
   const url = `/dl/${UPLOAD_ID}/${btn.dataset.file}`;
   const status = document.getElementById('dl-status');
 
@@ -131,7 +132,7 @@ async function download(btn, key) {
     }
   }
   for (const el of document.querySelectorAll('.file-size[data-cipher-size]')) {
-    el.textContent = fmtSize(E2E.layout(Number(el.dataset.cipherSize)).plainSize);
+    el.textContent = fmtSize(E2E.layout(Number(el.dataset.cipherSize), CHUNK_SIZE).plainSize);
   }
   for (const btn of document.querySelectorAll('button.dl-btn')) {
     btn.addEventListener('click', () => download(btn, key));

@@ -21,7 +21,7 @@ A key looks like `CODE#SECRET`.
 
 | Path | What it does |
 |---|---|
-| `/upload` | Enter `CODE#SECRET`, pick files, upload. Ends on **My uploads**, logging in with that key if needed. |
+| `/upload` | Enter `CODE#SECRET`, pick files, upload. Shows progress, speed and time left, and can be cancelled. Ends on **My uploads**, logging in with that key if needed. |
 | `/files` | **My uploads**: log in with `CODE#SECRET`; lists uploads with decrypted names, space used against the key's limit, and login history. |
 | `/files/CODE#SECRET` | Logs straight in. |
 | `/<upload-id>#<upload-key>` | Share page: decrypts the names and downloads the files. |
@@ -34,8 +34,9 @@ All of it is in `static/e2e.js`; `manage.py decrypt` mirrors it in Python.
 - Per-upload key: HKDF-SHA256 over SECRET, salt `transfer.lyr4.net v1`, info
   `upload:<upload-id>`, 32 bytes. A share link carries this key, so it opens that one
   upload and never reveals SECRET.
-- Files are sent in 50 MB chunks. Each chunk is AES-256-GCM with a random 12-byte IV,
-  stored as `iv || ciphertext || tag`. The additional data is
+- Files are sent in 16 MB chunks, four at a time; each upload records its chunk size,
+  and uploads made before this recorded none and used 50 MB. Each chunk is AES-256-GCM
+  with a random 12-byte IV, stored as `iv || ciphertext || tag`. The additional data is
   `<file-index>:<chunk-index>:<chunk-count>`, so chunks cannot be reordered, swapped
   between files or truncated without decryption failing.
 - File names are sealed the same way with additional data `name:<file-index>` and
@@ -69,13 +70,18 @@ full `CODE#SECRET` without echoing it and writes to `out-dir/<date>_<upload-id>/
 A size limit counts everything uploaded with the key plus the upload in progress; an
 upload that would go over is stopped and its partial data deleted.
 
+The server writes each chunk straight into its file at the offset the browser gives,
+so chunks can arrive in any order. Finalize checks every chunk arrived. A failed
+chunk is retried three times; a cancelled or failed upload is deleted, and anything
+unfinished and untouched for a day is swept away on the next finish or cancel.
+
 ## Running it
 
 Flask behind gunicorn, as a systemd user service (`transfer.service` in this
 directory):
 
 ```
-gunicorn -w 2 -b 0.0.0.0:5001 --timeout 120 --access-logfile - app:app
+gunicorn -w 2 --worker-class gthread --threads 8 -b 0.0.0.0:5001 --timeout 120 --access-logfile - app:app
 ```
 
 Python dependencies: `flask` and `gunicorn` for the app, `cryptography` for
