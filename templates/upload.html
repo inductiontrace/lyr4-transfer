@@ -4,6 +4,7 @@
 {% block page_head %}
 <h1>Upload files</h1>
 <p class="subtitle">Enter your full key, <code>CODE#SECRET</code>. Files are encrypted in your browser before upload.</p>
+{% if label %}<p class="subtitle" style="margin-top: 0.4rem;">Vault Name: <span style="color: var(--text); font-weight: 500;">{{ label }}</span></p>{% endif %}
 {% endblock %}
 
 {% block content %}
@@ -22,7 +23,8 @@
   </div>
 
   <div id="progress-area" style="display:none;">
-    <label id="progress-label">Uploading…</label>
+    <div id="progress-vault" style="font-size: 0.85rem; color: var(--text-dim); margin-bottom: 0.75rem;"></div>
+    <div id="progress-label" style="color: var(--text); font-size: 0.9rem; margin-bottom: 0.5rem; word-break: break-all;">Uploading…</div>
     <div style="background: var(--bg); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; margin-bottom: 0.5rem;">
       <div id="progress-bar" style="height: 6px; background: var(--accent); width: 0%;"></div>
     </div>
@@ -102,6 +104,24 @@ async function startUpload() {
   document.getElementById('form-area').style.display = 'none';
   document.getElementById('progress-area').style.display = 'block';
   document.getElementById('cancel-btn').disabled = false;
+  document.getElementById('progress-vault').textContent = '';
+  document.getElementById('progress-label').textContent = 'Checking key…';
+
+  let vault;
+  try {
+    const res = await fetch('/upload/check', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                               body: JSON.stringify({ auth_code: authCode }) });
+    vault = await res.json();
+  } catch (e) {
+    vault = { error: 'Network error while checking the key' };
+  }
+  if (vault.error) return showForm(vault.error);
+  const vaultLine = document.getElementById('progress-vault');
+  vaultLine.textContent = 'To vault: ';
+  const vaultName = document.createElement('span');
+  vaultName.style.cssText = 'color: var(--text); font-weight: 500;';
+  vaultName.textContent = vault.label || authCode;
+  vaultLine.append(vaultName);
 
   const uploadId = crypto.randomUUID();
   const upload = current = { uploadId, authCode, xhrs: new Set(), cancelled: false };
@@ -121,6 +141,7 @@ async function startUpload() {
 
   const totalBytes = files.reduce((s, f) => s + f.size, 0);
   let doneBytes = 0;
+  let currentFile = 0;                 // the file of the chunk most recently started
   const inFlight = new Map();          // task -> plaintext bytes sent so far
   const startedAt = performance.now();
   const ticker = setInterval(() => {
@@ -130,13 +151,15 @@ async function startUpload() {
     const elapsed = (performance.now() - startedAt) / 1000;
     const rate = sent / Math.max(elapsed, 0.001);
     document.getElementById('progress-bar').style.width = pct.toFixed(1) + '%';
+    const position = files.length > 1 ? ` (${currentFile + 1} of ${files.length})` : '';
     document.getElementById('progress-label').textContent =
-      `Uploading${files.length > 1 ? ` ${files.length} files` : ''}… ${pct.toFixed(1)}%`;
+      `Uploading ${files[currentFile].name}${position}… ${pct.toFixed(1)}%`;
     document.getElementById('progress-detail').textContent =
       `${fmtSize(sent)} of ${fmtSize(totalBytes)} · ${fmtSize(rate)}/s · ${fmtDuration((totalBytes - sent) / rate)} left`;
   }, 250);
 
   async function send(task) {
+    currentFile = task.fi;
     const plain = await task.file.slice(task.start, task.end).arrayBuffer();
     const sealed = await E2E.seal(key, plain, E2E.chunkAad(task.fi, task.ci, task.total));
     const fd = new FormData();

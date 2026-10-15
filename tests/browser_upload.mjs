@@ -46,7 +46,13 @@ try {
   send('Runtime.evaluate', { expression: 'startUpload()' });
   if (flag === '--cancel') {
     await sleep(3000);
+    console.log('vault line:', await evaluate(`document.getElementById('progress-vault').textContent`));
+    console.log('progress line:', await evaluate(`document.getElementById('progress-label').textContent`));
     console.log('progress before cancel:', await evaluate(`document.getElementById('progress-detail').textContent`));
+    if (process.env.SHOT) {
+      const { data } = (await send('Page.captureScreenshot', { format: 'png' })).result;
+      (await import('node:fs')).writeFileSync(process.env.SHOT, Buffer.from(data, 'base64'));
+    }
     await evaluate('cancelUpload()');
     console.log('page after cancel:', await evaluate(`document.getElementById('error-box').textContent`));
     ws.close();

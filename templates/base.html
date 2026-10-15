@@ -73,7 +73,7 @@
     }
 
     .site-header-inner {
-      max-width: 820px;
+      width: min(820px, calc(100% - 2rem));
       margin: 0 auto;
       height: 4rem;
       display: flex;
@@ -95,7 +95,6 @@
     .site-header svg { flex-shrink: 0; }
 
     @media (max-width: 700px) {
-      .site-header-inner { margin: 0 1rem; }
       .wordmark { font-size: 0.85rem; }
     }
 
@@ -114,7 +113,7 @@
 
     /* Page title and subtitle: wider than the panel and aligned with the header */
     .page-head {
-      max-width: 820px;
+      width: min(820px, calc(100% - 2rem));
       margin: 2.75rem auto 1.75rem;
       text-shadow: 0 1px 12px rgba(0, 0, 0, 0.7);
     }
@@ -123,7 +122,7 @@
 
     /* Narrow screens put the globe behind the page text, so dim it there */
     @media (max-width: 700px) {
-      .page-head { margin: 1.75rem 1rem 1.25rem; }
+      .page-head { margin: 1.75rem auto 1.25rem; }
       .page-head h1 { font-size: 1.5rem; }
       body {
         background-image: linear-gradient(rgba(17, 17, 19, 0.55), rgba(17, 17, 19, 0.55)), url('/static/page-bg.jpg');

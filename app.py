@@ -114,7 +114,18 @@ def favicon():
 
 @app.route('/upload', methods=['GET'])
 def upload_form():
-    return render_template('upload.html', auth_code=_session_code())
+    code = _session_code()
+    return render_template('upload.html', auth_code=code, label=_key_row(code)['label'] if code else None)
+
+
+@app.route('/upload/check', methods=['POST'])
+def upload_check():
+    """Before encrypting anything: is the key valid, and which vault does it name?"""
+    code = request.json.get('auth_code', '').strip()
+    row = _key_row(code) if code else None
+    if not row:
+        return jsonify({'error': 'Invalid upload key'}), 403
+    return jsonify({'label': row['label']})
 
 
 @app.route('/files/<code>')

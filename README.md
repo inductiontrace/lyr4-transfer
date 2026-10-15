@@ -21,7 +21,7 @@ A key looks like `CODE#SECRET`.
 
 | Path | What it does |
 |---|---|
-| `/upload` | Enter `CODE#SECRET`, pick files, upload. Shows progress, speed and time left, and can be cancelled. Ends on **My uploads**, logging in with that key if needed. |
+| `/upload` | Enter `CODE#SECRET`, pick files, upload. Checks the key first, then shows the destination vault, the file going up, progress, speed and time left, and can be cancelled. Ends on **My uploads**, logging in with that key if needed. |
 | `/files` | **My uploads**: log in with `CODE#SECRET`; lists uploads with decrypted names, space used against the key's limit, and login history. |
 | `/files/CODE#SECRET` | Logs straight in. |
 | `/<upload-id>#<upload-key>` | Share page: decrypts the names and downloads the files. |
