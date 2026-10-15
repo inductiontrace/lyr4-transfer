@@ -145,7 +145,11 @@ async function startUpload() {
   }
 
   if (data.error) return showError(data.error);
-  window.location.href = `/${uploadId}#${E2E.b64u(keyBytes)}`;
+  // Back to My uploads, where the new upload is listed with its share link. Logged in
+  // with this key already: go straight there; otherwise log in with the key just used.
+  try { sessionStorage.setItem('transfer_secret', secret); } catch (e) {}
+  const loggedIn = document.getElementById('auth_code').dataset.code === authCode;
+  window.location.href = loggedIn ? '/files' : `/files/${encodeURIComponent(authCode)}#${secret}`;
 }
 
 // Logged in from My uploads: rebuild CODE#SECRET from the session code and this tab's secret

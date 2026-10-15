@@ -21,7 +21,7 @@ A key looks like `CODE#SECRET`.
 
 | Path | What it does |
 |---|---|
-| `/upload` | Enter `CODE#SECRET`, pick files, upload. Ends on the upload's share page. |
+| `/upload` | Enter `CODE#SECRET`, pick files, upload. Ends on **My uploads**, logging in with that key if needed. |
 | `/files` | **My uploads**: log in with `CODE#SECRET`; lists uploads with decrypted names, space used against the key's limit, and login history. |
 | `/files/CODE#SECRET` | Logs straight in. |
 | `/<upload-id>#<upload-key>` | Share page: decrypts the names and downloads the files. |
@@ -95,6 +95,7 @@ HTTPS.
 | `static/` images | `favicon.ico`, `icon-512.png`, `apple-touch-icon.png`; `banner.jpg` (this README), `og.jpg` (1280×640 project image and link preview) and `page-bg.jpg` (page background behind a semi-opaque content panel; its edges match `--page` in `base.html`). |
 | `templates/` | Pages. |
 | `tests/e2e_roundtrip.mjs` | Round trip against a running server: `node tests/e2e_roundtrip.mjs http://127.0.0.1:5001 'CODE#SECRET'`. Run it from this directory with a throwaway key; it leaves one upload behind to delete. |
+| `tests/browser_upload.mjs` | Drives a real headless Chrome through the upload page with a throwaway key: `node tests/browser_upload.mjs http://localhost:5001 'CODE#SECRET' [--no-login]`. Checks it lands on My uploads with the name decrypted. |
 
 Created at runtime and kept out of git: `transfer.db` (keys and login history),
 `secret_key` (signs the session cookie), `uploads/`, `metadata/` and `staging/`.
