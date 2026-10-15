@@ -25,6 +25,7 @@ A key looks like `CODE#SECRET`.
 | `/files` | **My uploads**: log in with `CODE#SECRET`; lists uploads with decrypted names, space used against the key's limit, and login history. |
 | `/files/CODE#SECRET` | Logs straight in. |
 | `/<upload-id>#<upload-key>` | Share page: decrypts the names and downloads the files. |
+| `/dl/<upload-id>/<file>` | The stored (encrypted) file, fetched by the share page. Kept under its own prefix so a Cloudflare challenge can cover every page while leaving downloads alone. |
 
 ## Encryption
 

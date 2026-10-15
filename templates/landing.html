@@ -26,7 +26,7 @@
     {% if meta.encrypted %}
     <button class="dl-btn" data-file="{{ file.filename }}" data-index="{{ file.index }}" data-cipher-size="{{ file.size }}">↓</button>
     {% else %}
-    <a class="dl-btn" href="/{{ file_uuid }}/{{ file.filename }}" download>↓</a>
+    <a class="dl-btn" href="/dl/{{ file_uuid }}/{{ file.filename }}" download>↓</a>
     {% endif %}
   </div>
   {% endfor %}
@@ -72,7 +72,7 @@ async function download(btn, key) {
   const idx = Number(btn.dataset.index);
   const cipherSize = Number(btn.dataset.cipherSize);
   const { total, stride } = E2E.layout(cipherSize);
-  const url = `/${UPLOAD_ID}/${btn.dataset.file}`;
+  const url = `/dl/${UPLOAD_ID}/${btn.dataset.file}`;
   const status = document.getElementById('dl-status');
 
   // Stream to disk where the browser allows it; otherwise collect in memory

@@ -275,7 +275,7 @@ def file_landing(file_uuid):
     return render_template('landing.html', meta=meta, file_uuid=file_uuid)
 
 
-@app.route('/<file_uuid>/<filename>')
+@app.route('/dl/<file_uuid>/<filename>')
 def file_download(file_uuid, filename):
     meta = _load_meta(file_uuid)
     valid_names = {f['filename'] for f in meta['files']}

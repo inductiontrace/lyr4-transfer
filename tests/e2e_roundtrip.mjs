@@ -47,7 +47,7 @@ for (const f of meta.files) {
   const parts = [];
   for (let ci = 0; ci < total; ci++) {
     const end = Math.min((ci + 1) * stride, f.size) - 1;
-    const res = await fetch(`${base}/${uploadId}/${f.filename}`, { headers: { Range: `bytes=${ci * stride}-${end}` } });
+    const res = await fetch(`${base}/dl/${uploadId}/${f.filename}`, { headers: { Range: `bytes=${ci * stride}-${end}` } });
     parts.push(Buffer.from(await E2E.open(shareKey, await res.arrayBuffer(), E2E.chunkAad(f.index, ci, total))));
   }
   const got = Buffer.concat(parts), want = files[f.index].data;
@@ -56,7 +56,7 @@ for (const f of meta.files) {
 
 // Tamper: ask for file 1's chunk 1 but claim it is chunk 0
 const f1 = meta.files[1], { stride, total } = E2E.layout(f1.size);
-const res = await fetch(`${base}/${uploadId}/${f1.filename}`, { headers: { Range: `bytes=${stride}-${f1.size - 1}` } });
+const res = await fetch(`${base}/dl/${uploadId}/${f1.filename}`, { headers: { Range: `bytes=${stride}-${f1.size - 1}` } });
 try { await E2E.open(shareKey, await res.arrayBuffer(), E2E.chunkAad(1, 0, total)); console.log('reordered chunk: ACCEPTED (bad)'); }
 catch (e) { console.log('reordered chunk: rejected'); }
 // Wrong secret cannot read the name
