@@ -1,3 +1,4 @@
+import hashlib
 import os
 import uuid
 import json
@@ -389,6 +390,21 @@ def _fmt_size(size):
 
 
 app.jinja_env.filters['fmt_size'] = _fmt_size
+
+
+_asset_versions = {}
+
+
+def asset(path):
+    """A static URL tagged with a hash of the file, so a changed file gets a new URL
+    and no browser or Cloudflare cache can pair a new page with an old script."""
+    if path not in _asset_versions:
+        with open(os.path.join(app.static_folder, path), 'rb') as f:
+            _asset_versions[path] = hashlib.sha256(f.read()).hexdigest()[:10]
+    return f'/static/{path}?v={_asset_versions[path]}'
+
+
+app.jinja_env.globals['asset'] = asset
 
 
 # ─── Init ────────────────────────────────────────────────────────────────────

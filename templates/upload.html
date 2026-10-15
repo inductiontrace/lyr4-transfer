@@ -33,7 +33,7 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/e2e.js"></script>
+<script src="{{ asset('e2e.js') }}"></script>
 <script>
 const CHUNK_SIZE = E2E.CHUNK_SIZE;
 const PARALLEL = 4;    // chunks in flight at once

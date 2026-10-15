@@ -50,7 +50,7 @@
 
 {% block scripts %}
 {% if meta.encrypted %}
-<script src="/static/e2e.js"></script>
+<script src="{{ asset('e2e.js') }}"></script>
 <script>
 const UPLOAD_ID = {{ file_uuid | tojson }};
 const CHUNK_SIZE = {{ meta.chunk_size | default(none) | tojson }} || E2E.LEGACY_CHUNK_SIZE;

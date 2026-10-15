@@ -84,7 +84,7 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/e2e.js"></script>
+<script src="{{ asset('e2e.js') }}"></script>
 <script>
 function readSecret() {
   try { return sessionStorage.getItem('transfer_secret') || ''; } catch (e) { return ''; }
